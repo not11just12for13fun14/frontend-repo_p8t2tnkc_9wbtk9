@@ -8,6 +8,10 @@ function useBackend() {
 function App() {
   const { baseUrl } = useBackend()
   const [sellerEmail, setSellerEmail] = useState('')
+  const [sellerName, setSellerName] = useState('')
+  const [sellerTeam, setSellerTeam] = useState('')
+  const [managerMode, setManagerMode] = useState(false)
+
   const [personas, setPersonas] = useState([])
   const [personaKey, setPersonaKey] = useState('')
   const [loading, setLoading] = useState(false)
@@ -18,6 +22,10 @@ function App() {
 
   const [history, setHistory] = useState([])
   const [leaderboard, setLeaderboard] = useState([])
+  const [premium, setPremium] = useState(null)
+
+  // scoring weights config (local overrides)
+  const [weights, setWeights] = useState({ rapport: 0.3, discovery: 0.2, objection: 0.3, closing: 0.2 })
 
   useEffect(() => {
     // load personas
@@ -34,14 +42,72 @@ function App() {
     load()
   }, [baseUrl])
 
+  useEffect(() => {
+    if (!sellerEmail) return
+    fetchHistory(sellerEmail)
+    fetchPremium(sellerEmail)
+  }, [sellerEmail])
+
+  const headersWithAuth = () => {
+    const headers = { 'Content-Type': 'application/json' }
+    if (managerMode && sellerEmail) {
+      headers['X-User'] = `${sellerEmail}|manager|${sellerTeam || ''}`
+    }
+    return headers
+  }
+
+  const registerSeller = async () => {
+    if (!sellerEmail || !sellerName) return alert('Informe nome e e-mail')
+    try {
+      const res = await fetch(`${baseUrl}/api/register`, {
+        method: 'POST',
+        headers: headersWithAuth(),
+        body: JSON.stringify({ name: sellerName, email: sellerEmail, team: sellerTeam, role: managerMode ? 'manager' : 'seller' }),
+      })
+      if (!res.ok) throw new Error('Falha ao registrar')
+      alert('Perfil atualizado!')
+      fetchHistory(sellerEmail)
+      fetchLeaderboard('30d')
+      fetchPremium(sellerEmail)
+    } catch (e) {
+      alert(e.message)
+    }
+  }
+
+  const loadWeights = async () => {
+    try {
+      const query = new URLSearchParams({ email: sellerEmail || '', team: sellerTeam || '' })
+      const res = await fetch(`${baseUrl}/api/score-config?${query.toString()}`)
+      const data = await res.json()
+      if (data && data.weights) setWeights(data.weights)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const saveWeights = async (scope) => {
+    try {
+      const payload = { scope, team: scope === 'team' ? sellerTeam : undefined, email: scope === 'user' ? sellerEmail : undefined, weights }
+      const res = await fetch(`${baseUrl}/api/score-config`, {
+        method: 'POST',
+        headers: headersWithAuth(),
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) throw new Error('Falha ao salvar pesos')
+      alert('Pesos salvos!')
+    } catch (e) {
+      alert(e.message)
+    }
+  }
+
   const startSession = async () => {
     if (!sellerEmail || !personaKey) return
     setLoading(true)
     try {
       const res = await fetch(`${baseUrl}/api/sessions/start`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seller_email: sellerEmail, persona_key: personaKey }),
+        headers: headersWithAuth(),
+        body: JSON.stringify({ seller_email: sellerEmail, persona_key: personaKey, weights }),
       })
       if (!res.ok) throw new Error('Falha ao iniciar sessão')
       const data = await res.json()
@@ -51,6 +117,7 @@ function App() {
       // preload history and leaderboard
       fetchHistory(sellerEmail)
       fetchLeaderboard('30d')
+      fetchPremium(sellerEmail)
     } catch (e) {
       alert(e.message)
     } finally {
@@ -76,7 +143,7 @@ function App() {
     try {
       const res = await fetch(`${baseUrl}/api/sessions/${session.id}/message`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headersWithAuth(),
         body: JSON.stringify({ text }),
       })
       if (!res.ok) throw new Error('Erro ao enviar mensagem')
@@ -93,7 +160,7 @@ function App() {
     try {
       const res = await fetch(`${baseUrl}/api/sessions/${session.id}/finish`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headersWithAuth(),
         body: JSON.stringify({}),
       })
       if (!res.ok) throw new Error('Erro ao finalizar sessão')
@@ -102,6 +169,7 @@ function App() {
       // refresh history and leaderboard
       fetchHistory(sellerEmail)
       fetchLeaderboard('30d')
+      fetchPremium(sellerEmail)
     } catch (e) {
       alert(e.message)
     }
@@ -120,7 +188,7 @@ function App() {
 
   const fetchLeaderboard = async (period) => {
     try {
-      const res = await fetch(`${baseUrl}/api/leaderboard?period=${period}`)
+      const res = await fetch(`${baseUrl}/api/leaderboard?period=${period}${sellerTeam ? `&team=${encodeURIComponent(sellerTeam)}` : ''}`)
       const data = await res.json()
       setLeaderboard(data)
     } catch (e) {
@@ -128,7 +196,18 @@ function App() {
     }
   }
 
+  const fetchPremium = async (email) => {
+    try {
+      const res = await fetch(`${baseUrl}/api/premium-status?seller_email=${encodeURIComponent(email)}`)
+      const data = await res.json()
+      setPremium(data)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
   const currentScore = session?.current_score ? Math.round(session.current_score * 10) / 10 : 0
+  const lastFeedback = history?.[0]?.feedback
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
@@ -136,7 +215,7 @@ function App() {
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-slate-800">Plataforma de Treinamento de Vendas com IA</h1>
-            <p className="text-slate-600 text-sm">Roleplay com personas, pontuação em tempo real, histórico e ranking</p>
+            <p className="text-slate-600 text-sm">Roleplay com personas, pontuação em tempo real, histórico, ranking e coaching</p>
           </div>
           <a href="/test" className="text-sm text-blue-600 hover:underline">Ver status do backend</a>
         </div>
@@ -144,49 +223,100 @@ function App() {
 
       <main className="max-w-6xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left: Start & settings */}
-        <section className="lg:col-span-3 bg-white rounded-xl shadow-sm p-4 border">
-          <h2 className="text-lg font-semibold text-slate-800 mb-3">Iniciar Treinamento</h2>
-          <label className="block text-sm text-slate-700 mb-1">Seu e-mail</label>
-          <input
-            className="w-full border rounded-lg px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="você@empresa.com"
-            value={sellerEmail}
-            onChange={(e) => setSellerEmail(e.target.value)}
-            onBlur={() => fetchHistory(sellerEmail)}
-          />
+        <section className="lg:col-span-3 bg-white rounded-xl shadow-sm p-4 border space-y-3">
+          <h2 className="text-lg font-semibold text-slate-800">Perfil e Sessão</h2>
 
-          <label className="block text-sm text-slate-700 mb-1">Persona</label>
-          <select
-            className="w-full border rounded-lg px-3 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={personaKey}
-            onChange={(e) => setPersonaKey(e.target.value)}
-          >
-            {personas.map((p) => (
-              <option key={p.key} value={p.key}>{p.name}</option>
-            ))}
-          </select>
+          <div>
+            <label className="block text-sm text-slate-700 mb-1">Seu nome</label>
+            <input className="w-full border rounded-lg px-3 py-2" placeholder="Seu nome" value={sellerName} onChange={(e) => setSellerName(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-sm text-slate-700 mb-1">Seu e-mail</label>
+            <input
+              className="w-full border rounded-lg px-3 py-2"
+              placeholder="voce@empresa.com"
+              value={sellerEmail}
+              onChange={(e) => setSellerEmail(e.target.value)}
+              onBlur={() => { fetchHistory(sellerEmail); fetchPremium(sellerEmail); }}
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-slate-700 mb-1">Time (opcional)</label>
+            <input className="w-full border rounded-lg px-3 py-2" placeholder="ex.: Squad Norte" value={sellerTeam} onChange={(e) => setSellerTeam(e.target.value)} />
+          </div>
 
-          <button
-            onClick={startSession}
-            disabled={loading || !sellerEmail || !personaKey}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold py-2 rounded-lg transition"
-          >
-            {loading ? 'Iniciando...' : 'Iniciar Sessão'}
-          </button>
+          <div className="flex items-center gap-2">
+            <input id="managerMode" type="checkbox" checked={managerMode} onChange={(e) => setManagerMode(e.target.checked)} />
+            <label htmlFor="managerMode" className="text-sm text-slate-700">Modo gerente (permite salvar pesos globais/de time)</label>
+          </div>
 
-          <div className="mt-6">
+          <button onClick={registerSeller} className="w-full bg-slate-700 hover:bg-slate-800 text-white font-semibold py-2 rounded-lg">Salvar Perfil</button>
+
+          <div>
+            <label className="block text-sm text-slate-700 mb-1">Persona</label>
+            <select
+              className="w-full border rounded-lg px-3 py-2 mb-1"
+              value={personaKey}
+              onChange={(e) => setPersonaKey(e.target.value)}
+            >
+              {personas.map((p) => (
+                <option key={p.key} value={p.key}>{p.name}</option>
+              ))}
+            </select>
+            <p className="text-xs text-slate-500">Perfil DISC e gatilhos já parametrizados.</p>
+          </div>
+
+          <div className="mt-2">
+            <button
+              onClick={startSession}
+              disabled={loading || !sellerEmail || !personaKey}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold py-2 rounded-lg transition"
+            >
+              {loading ? 'Iniciando...' : 'Iniciar Sessão'}
+            </button>
+          </div>
+
+          <div className="mt-3">
             <h3 className="text-sm font-semibold text-slate-700 mb-2">Resumo</h3>
             <ul className="text-sm text-slate-600 space-y-1">
               <li>E-mail: {sellerEmail || '—'}</li>
+              <li>Time: {sellerTeam || '—'}</li>
               <li>Persona: {personas.find(p => p.key === personaKey)?.name || '—'}</li>
               <li>Status: {session ? (session.status === 'active' ? 'Em andamento' : 'Finalizada') : '—'}</li>
               <li>Pontuação atual: {currentScore}</li>
             </ul>
           </div>
+
+          <div className="mt-3 border-t pt-3">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-slate-700">Pesos da Pontuação</h3>
+              <button className="text-xs text-blue-600" onClick={loadWeights}>Carregar</button>
+            </div>
+            <WeightInput label="Rapport" value={weights.rapport} onChange={(v) => setWeights({ ...weights, rapport: v })} />
+            <WeightInput label="Descoberta" value={weights.discovery} onChange={(v) => setWeights({ ...weights, discovery: v })} />
+            <WeightInput label="Objeções" value={weights.objection} onChange={(v) => setWeights({ ...weights, objection: v })} />
+            <WeightInput label="Fechamento" value={weights.closing} onChange={(v) => setWeights({ ...weights, closing: v })} />
+            <div className="grid grid-cols-3 gap-2 mt-2">
+              <button className="text-xs bg-slate-100 rounded px-2 py-1" onClick={() => saveWeights('user')}>Salvar (Usuário)</button>
+              <button className="text-xs bg-slate-100 rounded px-2 py-1" onClick={() => saveWeights('team')}>Salvar (Time)</button>
+              <button className="text-xs bg-slate-100 rounded px-2 py-1" onClick={() => saveWeights('global')}>Salvar (Global)</button>
+            </div>
+          </div>
+
+          {premium && (
+            <div className={`mt-3 rounded-lg border p-3 ${premium.eligible ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+              <p className="text-sm font-semibold">Status Premium</p>
+              {premium.eligible ? (
+                <p className="text-sm text-emerald-700">Parabéns! Agendamentos premium liberados. Média: <b>{premium.average}</b> nos últimos {premium.last_n} roleplays.</p>
+              ) : (
+                <p className="text-sm text-amber-700">Faltam alguns pontos para liberar. {premium.reason || ''}</p>
+              )}
+            </div>
+          )}
         </section>
 
         {/* Middle: Chat */}
-        <section className="lg:col-span-6 bg-white rounded-xl shadow-sm p-4 border flex flex-col min-h-[480px]">
+        <section className="lg:col-span-6 bg-white rounded-xl shadow-sm p-4 border flex flex-col min-h-[520px]">
           <h2 className="text-lg font-semibold text-slate-800 mb-3">Simulação</h2>
 
           <div className="flex-1 overflow-y-auto border rounded-lg p-3 space-y-3 bg-slate-50">
@@ -229,8 +359,9 @@ function App() {
           </div>
 
           {lastMetrics && (
-            <div className="mt-3 grid grid-cols-3 gap-3 text-center">
+            <div className="mt-3 grid grid-cols-4 gap-3 text-center">
               <MetricCard title="Rapport" value={lastMetrics.rapport} />
+              <MetricCard title="Descoberta" value={lastMetrics.discovery} />
               <MetricCard title="Objeções" value={lastMetrics.objection} />
               <MetricCard title="Fechamento" value={lastMetrics.closing} />
             </div>
@@ -253,6 +384,13 @@ function App() {
                 </div>
               ))}
             </div>
+
+            {lastFeedback && (
+              <div className="mt-3 border-t pt-3">
+                <h3 className="text-sm font-semibold text-slate-700 mb-1">Último Feedback</h3>
+                <p className="text-xs text-slate-700 whitespace-pre-wrap bg-slate-50 p-2 rounded-lg border">{lastFeedback}</p>
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-xl shadow-sm p-4 border">
@@ -298,6 +436,20 @@ function MetricCard({ title, value }) {
     <div className="border rounded-lg p-3 bg-white">
       <p className="text-xs text-slate-600">{title}</p>
       <p className="text-xl font-semibold text-slate-800">{Math.round((value || 0) * 10) / 10}</p>
+    </div>
+  )
+}
+
+function WeightInput({ label, value, onChange }) {
+  return (
+    <div className="mb-2">
+      <div className="flex items-center justify-between text-xs text-slate-600">
+        <span>{label}</span>
+        <span>{Math.round((value || 0) * 100)}%</span>
+      </div>
+      <input type="range" min="0" max="1" step="0.05" value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="w-full" />
     </div>
   )
 }
